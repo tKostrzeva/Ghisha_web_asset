@@ -1,20 +1,18 @@
-// Ghisha Web Asset v04 — a noise-morphed sphere of glowing points with an
+// Ghisha Web Asset v05 — a noise-morphed sphere of glowing points with an
 // iridescent shell, a SOLID 2D membrane and interactive floating particles.
-// Based on v02, but the renderer NO LONGER uses the additive 'lighter' blend
-// mode. That blend mode is the reason the effect runs badly in Chrome (esp. on
-// Windows): every point is a drawImage with a per-point globalAlpha change under
-// a non-default composite op, which forces Skia to flush state thousands of
-// times per frame. Safari's canvas backend hides this; Chrome's does not.
+// Based on v04 (source-over, no additive 'lighter' blend — Chrome's fast path).
 //
-// The whole scene now draws with plain 'source-over' (Chrome's fast path). On a
-// dark background source-over and additive are identical for non-overlapping
-// sprites — they only diverge where sprites overlap. To keep the look we:
-//   • DEPTH-SORT the shell points (painter's algorithm, far → near) so source-over
-//     layering is correct and doesn't flicker as the sphere spins,
-//   • draw ONE sprite per point (iridescence baked into the choice) — ~half the
-//     draw calls of v02,
-//   • add a single soft BLOOM fill behind the sphere to recover the luminous haze
-//     that additive overlaps used to create.
+// New in v05: the glow is intensified by driving each point's BRIGHTNESS from how
+// crowded its patch of screen is — not just its opacity. Additive blending used to
+// make heavily-overlapping points pile up toward white; we recreate that without
+// the blend mode:
+//   • pass 1 bins every point into a coarse DENSITY GRID (weighted by opacity),
+//   • pass 2 reads each point's local crowding and, the denser it is, overlays a
+//     white "hot core" on top of the point's colour — so the most-overlapped
+//     points (the packed silhouette rim, tight clusters) glow almost white, while
+//     sparse areas keep their purple/iridescent colour.
+// Still one colour draw per point + a white overlay only where it's crowded, so it
+// stays far cheaper than the additive version and uses no special blend mode.
 //
 // Deploy: include p5.min.js + this file, and give #ghisha-sphere a size in CSS.
 // Tune the whole look from the CONFIG block below.
@@ -28,8 +26,9 @@ const CONFIG = {
 
   particleCount: 250,       // floating particles (0..400)
 
-  bloom:         45,        // 0..100 — soft glow halo behind the sphere (fakes the
-                            //          additive overlap haze). 0 = off.
+  bloom:         45,        // 0..100 — soft glow halo behind the sphere. 0 = off.
+  overlapWhiten: 80,        // 0..100 — how white the most-overlapping points get
+                            //          (the core of the intensified glow). 0 = off.
 
   // Two radial background gradients (below the sphere).
   gradA: { diameter: 50, density: 55, opacity: 50, x: 0,   y: 0   },
@@ -45,7 +44,7 @@ const DISP = 0.34;         // radial displacement as a fraction of base radius
 const COLOR_A = '#b25be1', COLOR_B = '#ffffff';   // sphere shell A→B duotone
 const MEMBRANE_COLOR = '#c5a0de';
 const BLOOM_COLOR = '#8f4fd6';                    // behind-sphere bloom colour
-const FLOAT_COLOR = '#1b0e45', INSIDE_COLOR = '#7D26E6';
+const FLOAT_COLOR = '#28086d', INSIDE_COLOR = '#7D26E6';
 const GRAD_A_COLOR = '#4D0079';                   // Gradient A — fixed purple
 const noiseSpeed = 0.007;
 const hollow = 40;
@@ -59,7 +58,7 @@ const membraneOpacity = 50, membraneDelay = 400, membraneGap = 70;   // solid �
 const membGradDiameter = 60, membGradDensity = 100, membGradCenter = 72, membGradWidth = 16;
 
 // ── Derived live settings (computed from CONFIG in setup) ─────────────────────
-let sphereCount, pointSize, glow, noiseScaleVal, particleCount, bloomAmt;
+let sphereCount, pointSize, glow, noiseScaleVal, particleCount, bloomAmt, overlapWhiten;
 const sphereShiftX = 0, sphereShiftY = 0, sphereScale = 1;   // centred, unscaled
 let gradDiameter, gradDensity, gradOpacity, gradPosX, gradPosY;
 let gradBDiameter, gradBDensity, gradBOpacity, gradBPosX, gradBPosY, gradBColor;
@@ -67,11 +66,14 @@ const bgColor = '#000000';
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let dirs = [];
-let coreSprites = [], irisSprites = [];
+let coreSprites = [], irisSprites = [], hotSprite = null;
 let floatGlow = null, floatCore = null, insideGlow = null, insideCore = null;
 
 // Per-point scratch buffers (filled each frame, then depth-sorted for drawing).
 let orderIdx, pDepth, pSx, pSy, pGs, pAlpha, pSprite;
+
+// Screen-space density grid (for overlap-driven whitening).
+let densGrid = null, densCols = 0, densRows = 0, densCell = 1;
 
 let fx, fy, fvx, fvy, ax, ay, hx, hy, fesc, fAlpha, fInside, fchg;
 let floatT = 0, floatReady = false, cursorOver = false;
@@ -150,8 +152,6 @@ function makeSprite(r, g, bl, stops) {
 }
 
 // One MERGED sprite per colour bucket: crisp core + glow halo baked in.
-// Under source-over (no additive stacking) we lift the halo alpha a touch so the
-// shell keeps some connective glow between points.
 function buildSprites() {
   const ca = color(COLOR_A), cb = color(COLOR_B);
   const gCore = map(glow, 1, 100, 0.16, 0.5);
@@ -167,6 +167,12 @@ function buildSprites() {
       [0.5, gCore * 0.42], [0.78, gCore * 0.13], [1.0, 0]
     ]);
   }
+  // White "hot core" overlay — a compact bright core with a moderate halo, laid on
+  // top of crowded points to push them toward white and intensify the glow there.
+  hotSprite = makeSprite(255, 255, 255, [
+    [0.0, 1.0], [coreStop * 0.85, 0.96], [coreStop * 1.5, gCore * 1.1],
+    [0.42, gCore * 0.4], [0.72, gCore * 0.12], [1.0, 0]
+  ]);
   buildIrisSprites();
 }
 
@@ -232,6 +238,7 @@ function setup() {
   pointSize   = map(CONFIG.quality, 1, 100, 45, 12.5);
   particleCount = CONFIG.particleCount;
   bloomAmt = CONFIG.bloom;
+  overlapWhiten = CONFIG.overlapWhiten;
   gradDiameter = CONFIG.gradA.diameter; gradDensity = CONFIG.gradA.density;
   gradOpacity  = CONFIG.gradA.opacity;  gradPosX = CONFIG.gradA.x; gradPosY = CONFIG.gradA.y;
   gradBDiameter = CONFIG.gradB.diameter; gradBDensity = CONFIG.gradB.density;
@@ -439,8 +446,7 @@ function renderScene(ctx, W, H, opaque) {
   drawRadialGradient(ctx, W, H, GRAD_A_COLOR, gradDiameter, gradDensity, gradOpacity, gradPosX, gradPosY);
   drawGradientB(ctx, W, H);
 
-  // Soft bloom behind the sphere — recovers the luminous haze that additive
-  // overlaps used to produce, as one cheap radial fill.
+  // Soft bloom behind the sphere — recovers the luminous haze.
   if (bloomAmt > 0) {
     const bc = color(BLOOM_COLOR);
     const br = Math.round(red(bc)), bg = Math.round(green(bc)), bb = Math.round(blue(bc));
@@ -460,7 +466,19 @@ function renderScene(ctx, W, H, opaque) {
                              cyR, syR, ct, st, minDim });
   }
 
-  // ── Sphere shell — pass 1: compute every point into the scratch buffers. ──
+  // Reset the density grid for this frame (cell ≈ one glow radius, so points in the
+  // same cell genuinely overlap). Reallocated only when the size changes.
+  const wantCell = Math.max(4, glowSize);
+  const wantCols = Math.ceil(W / wantCell) + 1, wantRows = Math.ceil(H / wantCell) + 1;
+  if (!densGrid || wantCols !== densCols || wantRows !== densRows) {
+    densCols = wantCols; densRows = wantRows; densCell = wantCell;
+    densGrid = new Float32Array(densCols * densRows);
+  } else {
+    densCell = wantCell;
+    densGrid.fill(0);
+  }
+
+  // ── Sphere shell — pass 1: compute every point + accumulate the density grid. ──
   for (let i = 0; i < sphereCount; i++) {
     const d = dirs[i];
     const n = noise(d.x * freq + offX, d.y * freq + offY, d.z * freq + noiseT);
@@ -479,16 +497,23 @@ function renderScene(ctx, W, H, opaque) {
     if (alpha < 0.004) { pAlpha[i] = 0; continue; }
 
     const persp = focal / (focal - rz2 * rBase);
-    pSx[i] = cx + rx * rBase * persp;
-    pSy[i] = cy + ry * rBase * persp;
+    const sx = cx + rx * rBase * persp;
+    const sy = cy + ry * rBase * persp;
+    pSx[i] = sx; pSy[i] = sy;
     pGs[i] = glowSize * persp;
     pAlpha[i] = alpha;
 
-    // Iridescence coverage: pick ONE sprite per point (base A→B bucket, or an
-    // iridescent hue where the coverage mask is high). One draw instead of two.
+    // Bin into the density grid, weighted by opacity (faint back points count for
+    // less — the crowding that matters is what's actually visible).
+    let gcx = (sx / densCell) | 0, gcy = (sy / densCell) | 0;
+    if (gcx < 0) gcx = 0; else if (gcx >= densCols) gcx = densCols - 1;
+    if (gcy < 0) gcy = 0; else if (gcy >= densRows) gcy = densRows - 1;
+    densGrid[gcy * densCols + gcx] += alpha;
+
+    // Iridescence coverage: pick ONE sprite per point (base A→B, or iridescent).
     const mnoise = noise(d.x * mFreq + mOff, d.y * mFreq + 5.1, d.z * mFreq + noiseT);
-    const w = smoothstep(mCut - 0.13, mCut + 0.13, mnoise);
-    if (w >= 0.5) {
+    const wc = smoothstep(mCut - 0.13, mCut + 0.13, mnoise);
+    if (wc >= 0.5) {
       const field = noise(d.x * irFreq + irOff, d.y * irFreq + 8.3, d.z * irFreq + noiseT);
       let hf = irHueF + field * irBandsN + rz2 * irAngleAmt;
       hf -= Math.floor(hf);
@@ -499,15 +524,37 @@ function renderScene(ctx, W, H, opaque) {
     }
   }
 
-  // ── Pass 2: depth-sort (far → near) and draw, so source-over layers correctly. ──
+  // Crowding thresholds, auto-scaled to this frame's average occupied-cell density
+  // (so it adapts to any quality / point count without manual calibration).
+  let sumDens = 0, occ = 0;
+  for (let c = 0; c < densGrid.length; c++) { const v = densGrid[c]; if (v > 0) { sumDens += v; occ++; } }
+  const avgDens = occ > 0 ? sumDens / occ : 1;
+  const loD = avgDens * 1.15, hiD = avgDens * 2.6;   // start / full whitening
+  const whitenMax = overlapWhiten / 100;
+
+  // ── Pass 2: depth-sort (far → near) and draw. Colour sprite first, then a white
+  //    hot-core overlay scaled by local crowding → dense areas glow toward white. ──
   orderIdx.sort((a, b) => pDepth[a] - pDepth[b]);
   for (let j = 0; j < sphereCount; j++) {
     const i = orderIdx[j];
     const al = pAlpha[i];
     if (al <= 0.004) continue;
-    const gs = pGs[i];
+    const gs = pGs[i], x = pSx[i], y = pSy[i];
+
     ctx.globalAlpha = al;
-    ctx.drawImage(pSprite[i], pSx[i] - gs / 2, pSy[i] - gs / 2, gs, gs);
+    ctx.drawImage(pSprite[i], x - gs / 2, y - gs / 2, gs, gs);
+
+    if (whitenMax > 0) {
+      let gcx = (x / densCell) | 0, gcy = (y / densCell) | 0;
+      if (gcx < 0) gcx = 0; else if (gcx >= densCols) gcx = densCols - 1;
+      if (gcy < 0) gcy = 0; else if (gcy >= densRows) gcy = densRows - 1;
+      const heat = smoothstep(loD, hiD, densGrid[gcy * densCols + gcx]);
+      const wht = heat * whitenMax;
+      if (wht > 0.02) {
+        ctx.globalAlpha = al * wht;
+        ctx.drawImage(hotSprite, x - gs / 2, y - gs / 2, gs, gs);
+      }
+    }
   }
 
   // ── Floating particles ──
