@@ -14,12 +14,12 @@
 
 // ── CONFIG — the entire look, matching Sphere tool v13's defaults ─────────────
 const CONFIG = {
-  quality:       80,        // 1..100 — point density (LOWER this first if it lags)
-  glow:          18,        // 1..100 — glow intensity of the shell points
+  quality:       30,        // 1..100 — point density (LOWER this first if it lags)
+  glow:          25,        // 1..100 — glow intensity of the shell points
   smoothness:    3,         // 1..4   — noise smoothness of the morph
   shapeSeed:     0,         // noise seed (fixes the silhouette)
 
-  particleCount: 400,       // floating particles (0..400)
+  particleCount: 250,       // floating particles (0..400)
 
   // Two radial background gradients (below the sphere).
   gradA: { diameter: 50, density: 55, opacity: 50, x: 0,   y: 0   },
