@@ -1,5 +1,5 @@
-// Ghisha Web Asset v02 — a noise-morphed sphere of glowing points with an
-// iridescent shell, a SOLID 2D membrane and interactive floating particles.
+// Ghisha Web Asset v01 — a noise-morphed sphere of glowing points with an
+// iridescent shell, a soft point-membrane and interactive floating particles.
 // Extracted from the Ghisha Sphere tool (v13) as a lightweight, drop-in website
 // asset: no UI, no export, no recording. It fills its container, is fully
 // responsive, and is tuned so it stays smooth on weaker machines —
@@ -7,22 +7,19 @@
 //   • pauses when scrolled off-screen (IntersectionObserver)
 //   • pauses when the browser tab is hidden (visibilitychange)
 //   • honours prefers-reduced-motion (renders a single static frame)
-//
-// Difference vs v01: the membrane is the "Solid 2D" type — a single
-// noise-wobbled silhouette blob filled with a radial gradient (ONE fill per
-// frame) instead of thousands of point sprites. Cheaper and a smoother shell.
+//   • only the "points" membrane + additive-on-black path are kept (leaner code)
 //
 // Deploy: include p5.min.js + this file, and give #ghisha-sphere a size in CSS.
 // Tune the whole look from the CONFIG block below (values match Sphere tool v13).
 
 // ── CONFIG — the entire look, matching Sphere tool v13's defaults ─────────────
 const CONFIG = {
-  quality:       30,        // 1..100 — point density (LOWER this first if it lags)
-  glow:          25,        // 1..100 — glow intensity of the shell points
+  quality:       80,        // 1..100 — point density (LOWER this first if it lags)
+  glow:          18,        // 1..100 — glow intensity of the shell points
   smoothness:    3,         // 1..4   — noise smoothness of the morph
   shapeSeed:     0,         // noise seed (fixes the silhouette)
 
-  particleCount: 250,       // floating particles (0..400)
+  particleCount: 400,       // floating particles (0..400)
 
   // Two radial background gradients (below the sphere).
   gradA: { diameter: 50, density: 55, opacity: 50, x: 0,   y: 0   },
@@ -45,10 +42,7 @@ const irisCoverage = 50, irisPatch = 45, irisBands = 35, irisScale = 14,
       irisSeed = 0, irisAngle = 42, irisHue = 40;   // iridescence
 const irisSat = 0.51;
 const reach = 45, pullForce = 1, floatTrail = 1, cloudSize = 25, breakthrough = 45;
-
-// ── Membrane — SOLID 2D (v13 "Solid 2D" defaults) ─────────────────────────────
-const membraneOpacity = 50, membraneDelay = 400, membraneGap = 70;   // solid → gap 70
-const membGradDiameter = 60, membGradDensity = 100, membGradCenter = 72, membGradWidth = 16;
+const membraneOpacity = 50, membraneDelay = 400, membraneGap = 37;   // points membrane
 
 // ── Derived live settings (computed from CONFIG in setup) ─────────────────────
 let sphereCount, pointSize, glow, noiseScaleVal, particleCount;
@@ -60,6 +54,7 @@ const bgColor = '#000000';
 // ── State ─────────────────────────────────────────────────────────────────────
 let dirs = [];
 let coreSprites = [], irisSprites = [];
+let membraneSprite = null;
 let floatGlow = null, floatCore = null, insideGlow = null, insideCore = null;
 
 let fx, fy, fvx, fvy, ax, ay, hx, hy, fesc, fAlpha, fInside, fchg;
@@ -147,6 +142,10 @@ function buildSprites() {
       [0.5, gCore * 0.35], [0.78, gCore * 0.1], [1.0, 0]
     ]);
   }
+  const mc = color(MEMBRANE_COLOR);
+  membraneSprite = makeSprite(Math.round(red(mc)), Math.round(green(mc)), Math.round(blue(mc)), [
+    [0.0, gCore], [0.30, gCore * 0.5], [0.6, gCore * 0.12], [1.0, 0]
+  ]);
   buildIrisSprites();
 }
 
@@ -233,11 +232,13 @@ function setup() {
     window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   if (reducedMotion) {
+    // Render a single static frame and stop — no motion, near-zero CPU.
     redraw();
     noLoop();
     return;
   }
 
+  // Pause the sketch when scrolled out of view.
   if ('IntersectionObserver' in window) {
     const io = new IntersectionObserver((entries) => {
       const visible = entries[0].isIntersecting;
@@ -245,6 +246,7 @@ function setup() {
     }, { threshold: 0 });
     io.observe(document.getElementById('ghisha-sphere'));
   }
+  // Pause when the tab is hidden.
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) noLoop();
     else if (isOnScreen()) loop();
@@ -253,6 +255,7 @@ function setup() {
   loop();
 }
 
+// Is the container currently within the viewport?
 function isOnScreen() {
   const el = document.getElementById('ghisha-sphere');
   const r = el.getBoundingClientRect();
@@ -383,7 +386,7 @@ function updateFloaters() {
   }
 }
 
-// ── Render (sphere shell + solid membrane + floaters), additive on black ──────
+// ── Render (sphere shell + point-membrane + floaters), additive on black ──────
 function renderScene(ctx, W, H, opaque) {
   const cx = W / 2, cy = H / 2;
   const minDim = Math.min(W, H);
@@ -403,6 +406,7 @@ function renderScene(ctx, W, H, opaque) {
   const mCut = map(irisCoverage, 0, 100, 1.06, -0.06);
   const gapWorld = minDim * map(membraneGap, 0, 100, 0.0, 0.05);
   const membAlpha = membraneOpacity / 100;
+  const membSize = glowSize * 1.5 * Math.SQRT2;
   const rimPow = map(hollow, 0, 100, 0.15, 4.0);
 
   const cyR = Math.cos(rot), syR = Math.sin(rot);
@@ -418,18 +422,13 @@ function renderScene(ctx, W, H, opaque) {
   drawRadialGradient(ctx, W, H, GRAD_A_COLOR, gradDiameter, gradDensity, gradOpacity, gradPosX, gradPosY);
   drawGradientB(ctx, W, H);
 
-  // Additive glow for membrane + sphere + particles (on black).
+  // Additive glow for sphere + membrane + particles (on black).
   ctx.globalCompositeOperation = 'lighter';
 
-  // ── Membrane: SOLID 2D — one noise-wobbled silhouette blob, drawn BEHIND the
-  //    shell (a single radial-gradient fill per frame). ──
-  if (membAlpha > 0) {
-    drawMembraneShape(ctx, { cx, cy, R, freq, offX, offY, gapWorld, membAlpha,
-                             cyR, syR, ct, st, minDim });
-  }
+  const drawMembPoints = membAlpha > 0;
 
-  // ── Sphere shell (glowing points) ──
-  for (let i = 0; i < sphereCount; i++) {
+  // ── Sphere shell (glowing points) + interleaved point-membrane ──
+  for (let i = 0, k = 0; i < sphereCount; i++, k++) {
     const d = dirs[i];
     const n = noise(d.x * freq + offX, d.y * freq + offY, d.z * freq + noiseT);
     const rBase = R * (1 + (n - 0.5) * 2 * DISP);
@@ -443,6 +442,16 @@ function renderScene(ctx, W, H, opaque) {
     const facing = map(rz2, -1, 1, 0.55, 1.0);
     const alpha = Math.pow(rim, rimPow) * facing;
     if (alpha < 0.004) continue;
+
+    if (drawMembPoints && (k & 1) === 0) {
+      const nm = noise(d.x * freq + offX, d.y * freq + offY, d.z * freq + membNT);
+      const rm = R * (1 + (nm - 0.5) * 2 * DISP) + gapWorld;
+      const perspM = focal / (focal - rz2 * rm);
+      const mx = cx + rx * rm * perspM, my = cy + ry * rm * perspM;
+      const ms = membSize * perspM;
+      ctx.globalAlpha = alpha * membAlpha;
+      ctx.drawImage(membraneSprite, mx - ms / 2, my - ms / 2, ms, ms);
+    }
 
     const bucket = Math.min(N_BUCKETS - 1, Math.max(0, Math.round(n * (N_BUCKETS - 1))));
     const persp = focal / (focal - rz2 * rBase);
@@ -481,61 +490,6 @@ function renderScene(ctx, W, H, opaque) {
 
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = 'source-over';
-}
-
-// Membrane as a single 2D noise-wobbled blob filled with a radial gradient
-// (membrane colour at the centre → fully transparent at the edge). One fill per
-// frame instead of thousands of point sprites. The wobble spins with the sphere.
-function drawMembraneShape(ctx, g) {
-  const cx = g.cx, cy = g.cy;
-  const R = g.R, gapWorld = g.gapWorld, freq = g.freq, offX = g.offX, offY = g.offY;
-  const cyR = g.cyR, syR = g.syR, ct = g.ct, st = g.st;
-  const RmemBase = R + gapWorld;
-  const M = 120;
-
-  // The outline traces the sphere's ACTUAL silhouette: for each screen angle the
-  // silhouette direction is (cosθ, sinθ, 0) in view space (z = 0, so it projects
-  // 1:1). Inverse-rotate it into object space to read the SAME noise the sphere
-  // uses — at membNT, so the delayed-wobble membrane still trails the shape.
-  ctx.beginPath();
-  for (let i = 0; i <= M; i++) {
-    const th = (i / M) * Math.PI * 2;
-    const vx = Math.cos(th), vy = Math.sin(th);
-    const rz = -vy * st, dy = vy * ct, rx = vx;
-    const dx = rx * cyR - rz * syR, dz = rx * syR + rz * cyR;
-    const nval = noise(dx * freq + offX, dy * freq + offY, dz * freq + membNT);
-    const rr = R * (1 + (nval - 0.5) * 2 * DISP) + gapWorld;
-    const px = cx + vx * rr, py = cy + vy * rr;
-    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-  }
-  ctx.closePath();
-
-  const mc = color(MEMBRANE_COLOR);
-  const mr = Math.round(red(mc)), mg = Math.round(green(mc)), mb = Math.round(blue(mc));
-
-  // A perfectly CIRCULAR radial gradient: transparent → colour → transparent.
-  // Because the fill is clipped to the wobbly silhouette, the fixed colour ring is
-  // crossed differently around the shape, so the colour reads sharp where the edge
-  // sits inside the ring and drifts off where the edge bulges past it.
-  //   diameter → overall radius of the gradient circle
-  //   center   → where along that radius the colour peaks (0 centre … 1 rim)
-  //   width    → half-thickness of the colour band before it fades either side
-  //   density  → peak opacity of the colour
-  const a0 = map(membGradDensity, 0, 100, 0.0, 1.0) * g.membAlpha;
-  const gRad = Math.max(1, RmemBase * map(membGradDiameter, 0, 100, 0.4, 2.2));
-  const pos = map(membGradCenter, 0, 100, 0.0, 1.0);
-  const halfW = map(membGradWidth, 0, 100, 0.02, 0.6);
-  const clampOff = o => (o < 0 ? 0 : o > 1 ? 1 : o);
-  const col = a => `rgba(${mr},${mg},${mb},${a})`;
-  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, gRad);
-  grad.addColorStop(0, col(0));
-  grad.addColorStop(clampOff(pos - halfW), col(0));
-  grad.addColorStop(clampOff(pos), col(a0));
-  grad.addColorStop(clampOff(pos + halfW), col(0));
-  grad.addColorStop(1, col(0));
-  ctx.globalAlpha = 1;
-  ctx.fillStyle = grad;
-  ctx.fill();
 }
 
 // A radial gradient (hex colour at its centre → transparent at the edge).
