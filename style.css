@@ -1,0 +1,29 @@
+/* Ghisha web asset v01 — minimal positioning for the embedded sphere.
+   The sphere lives inside #ghisha-sphere. Give that element whatever size you
+   need on your page (below it fills the viewport); the canvas fills it and is
+   fully responsive. Everything else here is just the demo page framing. */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: #000;
+  overflow: hidden;
+}
+
+/* The embed target. Size this however you like on your own site
+   (e.g. width:100%; height:600px, or a fixed square). */
+#ghisha-sphere {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* Make the p5 canvas fill the container and drop the default inline gap. */
+#ghisha-sphere canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
